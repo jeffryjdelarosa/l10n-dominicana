@@ -237,10 +237,11 @@ class Partner(models.Model):
                         info = self._convert_result(data)
 
                                                 
-                        info["name"] = " ".join(
-                            re.split(r"\s+", info["name"], flags=re.UNICODE))
-                                           
-                        partner_rnc.name = info["name"]
+                        if "name" in info:
+                            info["name"] = " ".join(
+                                re.split(r"\s+", info["name"], flags=re.UNICODE))
+                        
+                            partner_rnc.name = info["name"]
 
     @api.model
     def get_sale_fiscal_type_id_selection(self):
