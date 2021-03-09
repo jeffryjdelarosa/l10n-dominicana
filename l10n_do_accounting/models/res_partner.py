@@ -1,5 +1,7 @@
 import json
 import re
+import requests
+import lxml.html
 
 from odoo import models, fields, api, _
 from odoo.exceptions import UserError
