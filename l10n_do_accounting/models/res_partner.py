@@ -141,6 +141,24 @@ class Partner(models.Model):
     def _inverse_sale_fiscal_type_id(self):
         pass
 
+    def _convert_result(self, result):  # pragma: no cover
+        """Translate SOAP result entries into dictionaries."""
+        translation = {
+            u'Cédula/RNC': 'rnc',
+            u'Nombre Comercial':'commercial_name',
+            u'Régimen de pagos': 'type',
+            u'Categoría':"category",
+            u'Nombre/Razón Social': 'name',
+            'Estado': 'status',
+            u'Actividad Economica': 'activity', 
+            u'Administracion Local': 'local_place', 
+            
+        }
+        return dict(
+            (translation.get(key, key), value)
+            for key, value in result.items())
+        
+
     @api.onchange("vat")
     def _check_rnc(self):
         for partner_rnc in self:
@@ -167,14 +185,60 @@ class Partner(models.Model):
                         )
                     )
                 else:
+                    
+                    url = 'https://dgii.gov.do/app/WebApps/ConsultasWeb2/ConsultasWeb/consultas/rnc.aspx'
+                    session = requests.Session()
+                    session.headers.update({
+                        'User-Agent': 'Mozilla/5.0 (python-stdnum)',
+                    })
 
-                    result = rnc.check_dgii(partner_rnc.vat)
+                    document = lxml.html.fromstring(
+                    session.get(url, timeout=30).text)
+
+                    validation = document.find('.//input[@name="__EVENTVALIDATION"]').get('value')
+                    viewstate = document.find('.//input[@name="__VIEWSTATE"]').get('value')
+                    data = {
+                        '__EVENTVALIDATION': validation,
+                        '__VIEWSTATE': viewstate,
+                        'ctl00$cphMain$btnBuscarPorRNC': 'Buscar',
+                        'ctl00$cphMain$txtRNCCedula': partner_rnc.vat,
+                    }
+                    # Do the actual request
+                    document = lxml.html.fromstring(
+                        session.post(url, data=data, timeout=30).text)
+
+                    result = document.find('.//div[@id="cphMain_divBusqueda"]')
+                    message = document.findtext('.//*[@id="cphMain_lblInformacion"]')
+
                     if result is not None:
-                        # remove all duplicate white space from the name
-                        result["name"] = " ".join(
-                            re.split(r"\s+", result["name"], flags=re.UNICODE))
+                        hearder = []
+                        keys = []
+
+                        for x in result.findall('.//tr/td'):
+                            if x.attrib:
+                                hearder.append(x.text.strip())
+                            else:
+                                keys.append(x.text.strip()) 
+
+                        if message:
+                            data = {
+                                'validation_message': message.strip(),
+                            }
+                        else:
+                            data = {
+                                'validation_message': 'Cédula/RNC es Válido',
+                            }
+
+                        data.update(zip(hearder, keys))
                         
-                        partner_rnc.name = result["name"]
+
+                        info = self._convert_result(data)
+
+                                                
+                        info["name"] = " ".join(
+                            re.split(r"\s+", info["name"], flags=re.UNICODE))
+                                           
+                        partner_rnc.name = info["name"]
 
     @api.model
     def get_sale_fiscal_type_id_selection(self):
