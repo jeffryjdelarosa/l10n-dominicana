@@ -577,13 +577,13 @@ class DgiiReport(models.Model):
                             payments_dict[key] += self._convert_to_user_currency(
                                 invoice_id.currency_id,
                                 payment['amount'],
-                                invoice_id.date,                                
+                                invoice_id.date,
                             )
                         else:
                             payments_dict['credit'] += self._convert_to_user_currency(
                                 invoice_id.currency_id,
                                 payment['amount'],
-                                invoice_id.date,                                
+                                invoice_id.date,
                             )
                 else:
                     payments_dict['swap'] += self._convert_to_user_currency(
