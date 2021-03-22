@@ -183,7 +183,7 @@
                                             <td class="o_data_cell">OTRAS FORMAS DE VENTA</td>
                                             <td class="o_data_cell o_list_number"><field name="others" readonly="1"/></td>
                                         </tr>
-                                        <tr class="o_data_row text-success text-bf">
+                                        <tr class="o_data_row text-success_dgii text-bf">
                                             <td class="o_data_cell o_list_number">19</td>
                                             <td class="o_data_cell">TOTAL OPERACIONES POR TIPO DE VENTA (Sumar casillas 12+13+14+15+16+17+18)</td>
                                             <td class="o_data_cell o_list_number"><field name="sale_type_total" readonly="1"/></td>
@@ -231,7 +231,7 @@
                                             <td class="o_data_cell">OTROS INGRESOS</td>
                                             <td class="o_data_cell o_list_number"><field name="otr_income" readonly="1"/></td>
                                         </tr>
-                                        <tr class="o_data_row text-success text-bf">
+                                        <tr class="o_data_row text-success_dgii text-bf">
                                             <td class="o_data_cell o_list_number">26</td>
                                             <td class="o_data_cell">TOTAL POR TIPO DE INGRESO (Sumar casillas 20+21+22+23+24+25)</td>
                                             <td class="o_data_cell o_list_number"><field name="income_type_total" readonly="1"/></td>

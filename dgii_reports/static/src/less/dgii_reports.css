@@ -85,21 +85,21 @@
 .tile-color-table-default h2 {
     color: #777;
 }.o_form_view .o_field_widget .o_list_view > tfoot > tr > td,
-.o_list_view .text-info
+.o_list_view .text-info_dgii
   { 
     color: #fff !important;
     background: #008DCA !important;
     font-weight: 600 !important;
 }
 
-.o_list_view .text-success
+.o_list_view .text-success_dgii
   { 
     color: #fff !important;
     background: #109a10 !important;
     font-weight: 600 !important;
 }
 
-.o_list_view .text-warning
+.o_list_view .text-warning_dgii
   { 
     color: #fff !important;
     background: #bf9619 !important;
