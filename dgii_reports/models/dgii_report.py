@@ -574,27 +574,29 @@ class DgiiReport(models.Model):
                     key = payment_id.journal_id.payment_form
                     if key:
                         if self.include_payment(invoice_id, payment_id):
-                            payments_dict[
-                                key] += self._convert_to_user_currency(
-                                    invoice_id.currency_id, payment['amount'],
-                                invoice_id.date_invoice
+                            payments_dict[key] += self._convert_to_user_currency(
+                                invoice_id.currency_id,
+                                payment['amount'],
+                                invoice_id.date,                                
                             )
                         else:
-                            payments_dict[
-                                'credit'] += self._convert_to_user_currency(
-                                    invoice_id.currency_id, payment['amount'],
-                                invoice_id.date_invoice
+                            payments_dict['credit'] += self._convert_to_user_currency(
+                                invoice_id.currency_id,
+                                payment['amount'],
+                                invoice_id.date,                                
                             )
                 else:
-                    # Do not consider credit notes as swap payments
-                    continue
+                    payments_dict['swap'] += self._convert_to_user_currency(
+                        invoice_id.currency_id, payment['amount'], invoice_id.date)
             payments_dict['credit'] += self._convert_to_user_currency(
-                invoice_id.currency_id, invoice_id.residual,
-                invoice_id.date_invoice)
+                invoice_id.currency_id, invoice_id.residual, invoice_id.date)
         else:
+            for payment in invoice_id._get_invoice_payment_widget():
+                payments_dict['swap'] += self._convert_to_user_currency(
+                    invoice_id.currency_id, payment['amount'], invoice_id.date)
+
             payments_dict['credit'] += self._convert_to_user_currency(
-                invoice_id.currency_id, invoice_id.residual,
-                invoice_id.date_invoice)
+                invoice_id.currency_id, invoice_id.residual, invoice_id.date)
 
         return payments_dict
 
