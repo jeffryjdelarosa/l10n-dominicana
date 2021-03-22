@@ -574,27 +574,29 @@ class DgiiReport(models.Model):
                     key = payment_id.journal_id.payment_form
                     if key:
                         if self.include_payment(invoice_id, payment_id):
-                            payments_dict[
-                                key] += self._convert_to_user_currency(
-                                    invoice_id.currency_id, payment['amount'],
-                                invoice_id.date_invoice
+                            payments_dict[key] += self._convert_to_user_currency(
+                                invoice_id.currency_id,
+                                payment['amount'],
+                                invoice_id.date,
                             )
                         else:
-                            payments_dict[
-                                'credit'] += self._convert_to_user_currency(
-                                    invoice_id.currency_id, payment['amount'],
-                                invoice_id.date_invoice
+                            payments_dict['credit'] += self._convert_to_user_currency(
+                                invoice_id.currency_id,
+                                payment['amount'],
+                                invoice_id.date,
                             )
                 else:
-                    # Do not consider credit notes as swap payments
-                    continue
+                    payments_dict['swap'] += self._convert_to_user_currency(
+                        invoice_id.currency_id, payment['amount'], invoice_id.date)
             payments_dict['credit'] += self._convert_to_user_currency(
-                invoice_id.currency_id, invoice_id.residual,
-                invoice_id.date_invoice)
+                invoice_id.currency_id, invoice_id.residual, invoice_id.date)
         else:
+            for payment in invoice_id._get_invoice_payment_widget():
+                payments_dict['swap'] += self._convert_to_user_currency(
+                    invoice_id.currency_id, payment['amount'], invoice_id.date)
+
             payments_dict['credit'] += self._convert_to_user_currency(
-                invoice_id.currency_id, invoice_id.residual,
-                invoice_id.date_invoice)
+                invoice_id.currency_id, invoice_id.residual, invoice_id.date)
 
         return payments_dict
 
@@ -1084,10 +1086,46 @@ class DgiiReport(models.Model):
 
     def _has_withholding(self, inv):
         """Validate if given invoice has an Withholding tax"""
-        return True if any([inv.income_withholding,
-                            inv.withholded_itbis,
-                            inv.third_withheld_itbis,
-                            inv.third_income_withholding]) else False
+        tax_line_ids = inv._get_tax_line_ids()
+        witheld_itbis_types = ['A34', 'A36']
+        witheld_isr_types = ['ISR', 'A38']
+
+        # Monto ITBIS Retenido por impuesto
+        withholded_itbis = abs(
+            inv._convert_to_local_currency(
+                sum(
+                    tax_line_ids.filtered(
+                        lambda tax: tax.tax_id.purchase_tax_type ==
+                                    'ritbis').mapped('amount'))))
+
+        # Monto Retención Renta por impuesto
+        income_withholding = abs(
+            inv._convert_to_local_currency(
+                sum(
+                    tax_line_ids.filtered(
+                        lambda tax: tax.tax_id.purchase_tax_type ==
+                                    'isr').mapped('amount'))))
+
+        # ITBIS Retenido por Terceros
+        third_withheld_itbis = abs(
+            inv._convert_to_local_currency(
+                sum(
+                    tax_line_ids.filtered(
+                        lambda tax: tax.account_id.account_fiscal_type in witheld_itbis_types
+                    ).mapped('amount'))))
+
+        # Retención de Renta por Terceros
+        third_income_withholding = abs(
+            inv._convert_to_local_currency(
+                sum(
+                    tax_line_ids.filtered(
+                        lambda tax: tax.account_id.account_fiscal_type in witheld_isr_types
+                    ).mapped('amount'))))
+
+        return True if any([income_withholding,
+                            withholded_itbis,
+                            third_withheld_itbis,
+                            third_income_withholding]) else False
 
     @api.multi
     def _invoice_status_sent(self):
