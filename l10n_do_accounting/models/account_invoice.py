@@ -1,473 +1,678 @@
-# Part of Domincana Premium.
-# See LICENSE file for full copyright and licensing details.
+# TODO: poner authorship en todos los archivos .py (xml tamb?)
 
-import json
-
+import logging
 from odoo import models, fields, api, _
-from odoo.exceptions import ValidationError
+from odoo.exceptions import UserError, ValidationError
 
+_logger = logging.getLogger(__name__)
 
-class InvoiceServiceTypeDetail(models.Model):
-    _name = 'invoice.service.type.detail'
-    _description = "Invoice Service Type Detail"
+try:
+    from stdnum.do import ncf as ncf_validation
+except (ImportError, IOError) as err:
+    _logger.debug(err)
 
-    name = fields.Char()
-    code = fields.Char(size=2)
-    parent_code = fields.Char()
-
-    _sql_constraints = [
-        ('code_unique', 'unique(code)', _('Code must be unique')),
-    ]
+ncf_dict = {
+    "B01": "fiscal",
+    "B02": "consumo",
+    "B15": "gov",
+    "B14": "especial",
+    "B12": "unico",
+    "B16": "export",
+    "B03": "debit",
+    "B04": "credit",
+    "B13": "minor",
+    "B11": "informal",
+    "B17": "exterior",
+}
 
 
 class AccountInvoice(models.Model):
-    _inherit = 'account.invoice'
+    _inherit = "account.invoice"
 
-    def _get_invoice_payment_widget(self):
-        j = json.loads(self.payments_widget)
-        return j['content'] if j else []
-
-    def _compute_invoice_payment_date(self):
-        for inv in self:
-            if inv.state == 'paid':
-                dates = [
-                    payment['date'] for payment in inv._get_payments_vals()
-                ]
-                if dates:
-                    max_date = max(dates)
-                    date_invoice = inv.date_invoice
-                    inv.payment_date = max_date if max_date >= date_invoice \
-                        else date_invoice
-
-    @api.multi
-    @api.constrains('tax_line_ids')
-    def _check_isr_tax(self):
-        """Restrict one ISR tax per invoice"""
-        for inv in self:
-            line = [
-                tax_line.tax_id.purchase_tax_type
-                for tax_line in inv.tax_line_ids
-                if tax_line.tax_id.purchase_tax_type in ['isr', 'ritbis']
-            ]
-            if len(line) != len(set(line)):
-                raise ValidationError(_('An invoice cannot have multiple'
-                                        'withholding taxes.'))
-
-    def _convert_to_local_currency(self, amount):
-        sign = -1 if self.type in ['in_refund', 'out_refund'] else 1
-        if self.currency_id != self.company_id.currency_id:
-            currency_id = self.currency_id.with_context(date=self.date_invoice)
-            round_curr = currency_id.round
-            amount = round_curr(
-                currency_id._convert(amount, self.company_id.currency_id,
-                                     self.company_id, self.date_invoice))
-
-        return amount * sign
-
-    def _get_tax_line_ids(self):
-        return self.tax_line_ids
-
-    @api.multi
-    @api.depends('tax_line_ids', 'tax_line_ids.amount', 'state')
-    def _compute_taxes_fields(self):
-        """Compute invoice common taxes fields"""
-        for inv in self:
-
-            tax_line_ids = inv._get_tax_line_ids()
-
-            if inv.state != 'draft':
-                # Monto Impuesto Selectivo al Consumo
-                inv.selective_tax = inv._convert_to_local_currency(
-                    sum(
-                        tax_line_ids.filtered(
-                            lambda tax: tax.tax_id.tax_group_id.name == 'ISC')
-                        .mapped('amount')))
-
-                # Monto Otros Impuestos/Tasas
-                inv.other_taxes = inv._convert_to_local_currency(
-                    sum(
-                        tax_line_ids.filtered(
-                            lambda tax: tax.tax_id.tax_group_id.name ==
-                            "Otros Impuestos").mapped('amount')))
-
-                # Monto Propina Legal
-                inv.legal_tip = inv._convert_to_local_currency(
-                    sum(
-                        tax_line_ids.filtered(
-                            lambda tax: tax.tax_id.tax_group_id.name ==
-                            'Propina').mapped('amount')))
-
-                # ITBIS sujeto a proporcionalidad
-                inv.proportionality_tax = inv._convert_to_local_currency(
-                    sum(
-                        tax_line_ids.filtered(
-                            lambda tax: tax.account_id.account_fiscal_type in
-                            ['A29', 'A30']).mapped('amount')))
-
-                # ITBIS llevado al Costo
-                inv.cost_itbis = inv._convert_to_local_currency(
-                    sum(
-                        tax_line_ids.filtered(
-                            lambda tax: tax.account_id.account_fiscal_type ==
-                            'A51').mapped('amount')))
-
-                if inv.type == 'out_invoice' and any([
-                    inv.third_withheld_itbis,
-                    inv.third_income_withholding
-                        ]):
-                    # Fecha Pago
-                    inv._compute_invoice_payment_date()
-
-                if inv.type == 'in_invoice' and any([
-                    inv.withholded_itbis,
-                    inv.income_withholding
-                        ]):
-                    # Fecha Pago
-                    inv._compute_invoice_payment_date()
-
-    @api.multi
-    @api.depends('invoice_line_ids', 'invoice_line_ids.product_id', 'state')
-    def _compute_amount_fields(self):
-        """Compute Purchase amount by product type"""
-        for inv in self:
-            if inv.type in [
-                'in_invoice', 'in_refund'
-                    ] and inv.state != 'draft':
-                service_amount = 0
-                good_amount = 0
-
-                for line in inv.invoice_line_ids:
-
-                    # Monto calculado en bienes
-                    if line.product_id.type in ['product', 'consu']:
-                        good_amount += line.price_subtotal
-
-                    # Si la linea no tiene un producto
-                    elif not line.product_id:
-                        service_amount += line.price_subtotal
-                        continue
-
-                    # Monto calculado en servicio
-                    else:
-                        service_amount += line.price_subtotal
-
-                inv.service_total_amount = inv._convert_to_local_currency(
-                    service_amount)
-                inv.good_total_amount = inv._convert_to_local_currency(
-                    good_amount)
-
-    @api.multi
-    @api.depends('invoice_line_ids', 'invoice_line_ids.product_id', 'state')
-    def _compute_isr_withholding_type(self):
-        """Compute ISR Withholding Type
-
-        Keyword / Values:
-        01 -- Alquileres
-        02 -- Honorarios por Servicios
-        03 -- Otras Rentas
-        04 -- Rentas Presuntas
-        05 -- Intereses Pagados a Personas Jurídicas
-        06 -- Intereses Pagados a Personas Físicas
-        07 -- Retención por Proveedores del Estado
-        08 -- Juegos Telefónicos
-        """
-        for inv in self:
-            if inv.type == 'in_invoice' and inv.state != 'draft':
-                isr = [
-                    tax_line.tax_id
-                    for tax_line in inv.tax_line_ids
-                    if tax_line.tax_id.purchase_tax_type == 'isr'
-                ]
-                if isr:
-                    inv.isr_withholding_type = isr.pop(0).isr_retention_type
-
-    def _get_payment_string(self):
-        """Compute Vendor Bills payment method string
-
-        Keyword / Values:
-        cash        -- Efectivo
-        bank        -- Cheques / Transferencias / Depósitos
-        card        -- Tarjeta Crédito / Débito
-        credit      -- Compra a Crédito
-        swap        -- Permuta
-        credit_note -- Notas de Crédito
-        mixed       -- Mixto
-        """
-        payments = []
-        p_string = ""
-
-        for payment in self._get_invoice_payment_widget():
-            payment_id = self.env['account.payment'].browse(
-                payment.get('account_payment_id'))
-            move_id = False
-            if payment_id:
-                if payment_id.journal_id.type in ['cash', 'bank']:
-                    p_string = payment_id.journal_id.payment_form
-
-            if not payment_id:
-                move_id = self.env['account.move'].browse(
-                    payment.get('move_id'))
-                if move_id:
-                    p_string = 'swap'
-
-            # If invoice is paid, but the payment doesn't come from
-            # a journal, assume it is a credit note
-            payment = p_string if payment_id or move_id else 'credit_note'
-            payments.append(payment)
-
-        methods = {p for p in payments}
-        if len(methods) == 1:
-            return list(methods)[0]
-        elif len(methods) > 1:
-            return 'mixed'
-
-    @api.multi
-    @api.depends('state')
-    def _compute_in_invoice_payment_form(self):
-        for inv in self:
-            if inv.state == 'paid':
-                payment_dict = {'cash': '01', 'bank': '02', 'card': '03',
-                                'credit': '04', 'swap': '05',
-                                'credit_note': '06', 'mixed': '07'}
-                inv.payment_form = payment_dict.get(inv._get_payment_string())
-            else:
-                inv.payment_form = '04'
-
-    @api.multi
-    @api.depends('tax_line_ids', 'tax_line_ids.amount', 'state')
-    def _compute_invoiced_itbis(self):
-        """Compute invoice invoiced_itbis taking into account the currency"""
-        for inv in self:
-            amount = 0
-            if inv.state != 'draft':
-                itbis_taxes = ['ITBIS', 'ITBIS 18%']
-                for tax in inv._get_tax_line_ids():
-                    if tax.tax_id.tax_group_id.name in itbis_taxes and tax.tax_id.purchase_tax_type != 'ritbis':
-                        amount += tax.amount
-                inv.invoiced_itbis = inv._convert_to_local_currency(amount)
-
-
-    def _get_payment_move_iterator(self, payment, inv_type, witheld_type):
-        payment_id = self.env['account.payment'].browse(
-            payment.get('account_payment_id'))
-        if payment_id:
-            if inv_type == 'out_invoice':
-                return [
-                    move_line.debit
-                    for move_line in payment_id.move_line_ids
-                    if move_line.account_id.account_fiscal_type in witheld_type
-                ]
-            else:
-                return [
-                    move_line.credit
-                    for move_line in payment_id.move_line_ids
-                    if move_line.account_id.account_fiscal_type in witheld_type
-                ]
-        else:
-            move_id = self.env['account.move'].browse(payment.get('move_id'))
-            if move_id:
-                if inv_type == 'out_invoice':
-                    return [
-                        move_line.debit
-                        for move_line in move_id.line_ids
-                        if move_line.account_id.account_fiscal_type in
-                        witheld_type
-                    ]
-                else:
-                    return [
-                        move_line.credit
-                        for move_line in move_id.line_ids
-                        if move_line.account_id.account_fiscal_type in
-                        witheld_type
-                    ]
-
-    @api.multi
-    @api.depends('state')
-    def _compute_withheld_taxes(self):
-        for inv in self:
-            if inv.state == 'paid':
-                inv.third_withheld_itbis = 0
-                inv.third_income_withholding = 0
-                witheld_itbis_types = ['A34', 'A36']
-                witheld_isr_types = ['ISR', 'A38']
-                tax_line_ids = inv._get_tax_line_ids()
-
-                if inv.type == 'out_invoice':
-                    # ITBIS Retenido por Terceros
-                    inv.third_withheld_itbis = abs(
-                        inv._convert_to_local_currency(
-                            sum(
-                                tax_line_ids.filtered(
-                                    lambda tax: tax.account_id.account_fiscal_type in witheld_itbis_types
-                                ).mapped('amount'))))
-
-                    # Retención de Renta por Terceros
-                    inv.third_income_withholding = abs(
-                        inv._convert_to_local_currency(
-                            sum(
-                                tax_line_ids.filtered(
-                                    lambda tax: tax.account_id.account_fiscal_type in witheld_isr_types
-                                ).mapped('amount'))))
-
-                elif inv.type == 'in_invoice':
-
-                    # ITBIS Retenido a Terceros
-                    inv.withholded_itbis = abs(
-                        inv._convert_to_local_currency(
-                            sum(
-                                tax_line_ids.filtered(
-                                    lambda tax: tax.tax_id.purchase_tax_type ==
-                                    'ritbis').mapped('amount'))))
-
-                    # Retención de Renta a Terceros
-                    inv.income_withholding = abs(
-                        inv._convert_to_local_currency(
-                            sum(
-                                tax_line_ids.filtered(
-                                    lambda tax: tax.tax_id.purchase_tax_type ==
-                                    'isr').mapped('amount'))))
-
-                # TODO: Esta parte esta comentada porque solo funciona para v10-v11 podria funcionar en un futuro
-                # for payment in inv._get_invoice_payment_widget():
-                #
-                #     if inv.type == 'out_invoice':
-                #         # ITBIS Retenido por Terceros
-                #         inv.third_withheld_itbis += sum(
-                #             self._get_payment_move_iterator(
-                #                 payment, inv.type, witheld_itbis_types))
-                #
-                #         # Retención de Renta pr Terceros
-                #         inv.third_income_withholding += sum(
-                #             self._get_payment_move_iterator(
-                #                 payment, inv.type, witheld_isr_types))
-                #     elif inv.type == 'in_invoice':
-                #         # ITBIS Retenido a Terceros
-                #         inv.withholded_itbis += sum(
-                #             self._get_payment_move_iterator(
-                #                 payment, inv.type, witheld_itbis_types))
-                #
-                #         # Retención de Renta a Terceros
-                #         inv.income_withholding += sum(
-                #             self._get_payment_move_iterator(
-                #                 payment, inv.type, witheld_isr_types))
-
-    @api.multi
-    @api.depends('invoiced_itbis', 'cost_itbis', 'state')
-    def _compute_advance_itbis(self):
-        for inv in self:
-            if inv.state != 'draft':
-                inv.advance_itbis = inv.invoiced_itbis - inv.cost_itbis
-
-    @api.multi
-    @api.depends('fiscal_type_id.purchase_type')
-    def _compute_is_exterior(self):
-        for inv in self:
-            inv.is_exterior = True if inv.fiscal_type_id.purchase_type == \
-                'exterior' else False
-
-    @api.onchange('service_type')
-    def onchange_service_type(self):
-        self.service_type_detail = False
-        return {
-            'domain': {
-                'service_type_detail': [
-                    ('parent_code', '=', self.service_type)
-                    ]
-            }
-        }
-
-    @api.onchange('journal_id')
-    def ext_onchange_journal_id(self):
-        self.service_type = False
-        self.service_type_detail = False
-
-    # ISR Percibido       --> Este campo se va con 12 espacios en 0 para el 606
-    # ITBIS Percibido     --> Este campo se va con 12 espacios en 0 para el 606
-    payment_date = fields.Date(compute='_compute_taxes_fields', store=True)
-    service_total_amount = fields.Monetary(
-        compute='_compute_amount_fields',
-        store=True,
-        currency_field='company_currency_id')
-    good_total_amount = fields.Monetary(compute='_compute_amount_fields',
-                                        store=True,
-                                        currency_field='company_currency_id')
-    invoiced_itbis = fields.Monetary(compute='_compute_invoiced_itbis',
-                                     store=True,
-                                     currency_field='company_currency_id')
-    withholded_itbis = fields.Monetary(compute='_compute_withheld_taxes',
-                                       store=True,
-                                       currency_field='company_currency_id')
-    proportionality_tax = fields.Monetary(compute='_compute_taxes_fields',
-                                          store=True,
-                                          currency_field='company_currency_id')
-    cost_itbis = fields.Monetary(compute='_compute_taxes_fields',
-                                 store=True,
-                                 currency_field='company_currency_id')
-    advance_itbis = fields.Monetary(compute='_compute_advance_itbis',
-                                    store=True,
-                                    currency_field='company_currency_id')
-    isr_withholding_type = fields.Char(compute='_compute_isr_withholding_type',
-                                       store=True,
-                                       size=2)
-    income_withholding = fields.Monetary(compute='_compute_withheld_taxes',
-                                         store=True,
-                                         currency_field='company_currency_id')
-    selective_tax = fields.Monetary(compute='_compute_taxes_fields',
-                                    store=True,
-                                    currency_field='company_currency_id')
-    other_taxes = fields.Monetary(compute='_compute_taxes_fields',
-                                  store=True,
-                                  currency_field='company_currency_id')
-    legal_tip = fields.Monetary(compute='_compute_taxes_fields',
-                                store=True,
-                                currency_field='company_currency_id')
-    payment_form = fields.Selection([('01', 'Cash'),
-                                     ('02', 'Check / Transfer / Deposit'),
-                                     ('03', 'Credit Card / Debit Card'),
-                                     ('04', 'Credit'), ('05', 'Swap'),
-                                     ('06', 'Credit Note'), ('07', 'Mixed')],
-                                    compute='_compute_in_invoice_payment_form',
-                                    store=True)
-    third_withheld_itbis = fields.Monetary(
-        compute='_compute_withheld_taxes',
-        store=True,
-        currency_field='company_currency_id')
-    third_income_withholding = fields.Monetary(
-        compute='_compute_withheld_taxes',
-        store=True,
-        currency_field='company_currency_id')
-    is_exterior = fields.Boolean(compute='_compute_is_exterior', store=True)
-    service_type = fields.Selection([
-        ('01', 'Gastos de Personal'),
-        ('02', 'Gastos por Trabajos, Suministros y Servicios'),
-        ('03', 'Arrendamientos'), ('04', 'Gastos de Activos Fijos'),
-        ('05', 'Gastos de Representación'), ('06', 'Gastos Financieros'),
-        ('07', 'Gastos de Seguros'),
-        ('08', 'Gastos por Regalías y otros Intangibles')
-    ])
-    service_type_detail = fields.Many2one('invoice.service.type.detail')
-    fiscal_status = fields.Selection(
-        [('normal', 'Partial'), ('done', 'Reported'), ('blocked', 'Not Sent')],
+    fiscal_type_id = fields.Many2one(
+        "account.fiscal.type", string="Fiscal Type", index=True,
+    )
+    fiscal_sequence_id = fields.Many2one(
+        "account.fiscal.sequence",
+        string="Fiscal Sequence",
         copy=False,
-        help="* The \'Grey\' status means ...\n"
-        "* The \'Green\' status means ...\n"
-        "* The \'Red\' status means ...\n"
-        "* The blank status means that the invoice have"
-        "not been included in a report."
+        compute="_compute_fiscal_sequence",
+        store=True,
+    )
+    income_type = fields.Selection(
+        [
+            ("01", "01 - Ingresos por Operaciones (No Financieros)"),
+            ("02", "02 - Ingresos Financieros"),
+            ("03", "03 - Ingresos Extraordinarios"),
+            ("04", "04 - Ingresos por Arrendamientos"),
+            ("05", "05 - Ingresos por Venta de Activo Depreciable"),
+            ("06", "06 - Otros Ingresos"),
+        ],
+        string="Income Type",
+        default=lambda self: self._context.get("income_type", "01"),
     )
 
-    @api.model
-    def norma_recompute(self):
-        """
-        This method add all compute fields into []env
-        add_todo and then recompute
-        all compute fields in case dgii config change and need to recompute.
-        :return:
-        """
-        active_ids = self._context.get("active_ids")
-        invoice_ids = self.browse(active_ids)
-        for k, v in self.fields_get().items():
-            if v.get("store") and v.get("depends"):
-                self.env.add_todo(self._fields[k], invoice_ids)
+    expense_type = fields.Selection(
+        [
+            ("01", "01 - Gastos de Personal"),
+            ("02", "02 - Gastos por Trabajo, Suministros y Servicios"),
+            ("03", "03 - Arrendamientos"),
+            ("04", "04 - Gastos de Activos Fijos"),
+            ("05", u"05 - Gastos de Representación"),
+            ("06", "06 - Otras Deducciones Admitidas"),
+            ("07", "07 - Gastos Financieros"),
+            ("08", "08 - Gastos Extraordinarios"),
+            ("09", "09 - Compras y Gastos que forman parte del Costo de Venta"),
+            ("10", "10 - Adquisiciones de Activos"),
+            ("11", "11 - Gastos de Seguros"),
+        ],
+        string="Cost & Expense Type",
+    )
 
-        self.recompute()
+    anulation_type = fields.Selection(
+        [
+            ("01", "01 - Deterioro de Factura Pre-impresa"),
+            ("02", u"02 - Errores de Impresión (Factura Pre-impresa)"),
+            ("03", u"03 - Impresión Defectuosa"),
+            ("04", u"04 - Corrección de la Información"),
+            ("05", "05 - Cambio de Productos"),
+            ("06", u"06 - Devolución de Productos"),
+            ("07", u"07 - Omisión de Productos"),
+            ("08", "08 - Errores en Secuencia de NCF"),
+            ("09", "09 - Por Cese de Operaciones"),
+            ("10", u"10 - Pérdida o Hurto de Talonarios"),
+        ],
+        string="Annulment Type",
+        copy=False,
+    )
+    origin_out = fields.Char("Affects",)
+    ncf_expiration_date = fields.Date("Valid until", store=True,)
+    is_l10n_do_fiscal_invoice = fields.Boolean(
+        compute="_compute_is_l10n_do_fiscal_invoice",
+        store=True,
+        string="Is Fiscal Invoice",
+    )
+    assigned_sequence = fields.Boolean(related="fiscal_type_id.assigned_sequence",)
+    fiscal_sequence_status = fields.Selection(
+        [
+            ("no_fiscal", "No fiscal"),
+            ("fiscal_ok", "Ok"),
+            ("almost_no_sequence", "Almost no sequence"),
+            ("no_sequence", "Depleted"),
+        ],
+        compute="_compute_fiscal_sequence_status",
+    )
+    is_debit_note = fields.Boolean()
+
+    @api.multi
+    @api.depends("state", "journal_id")
+    def _compute_is_l10n_do_fiscal_invoice(self):
+        for inv in self:
+            inv.is_l10n_do_fiscal_invoice = inv.journal_id.l10n_do_fiscal_journal
+
+    @api.multi
+    @api.depends(
+        "journal_id",
+        "is_l10n_do_fiscal_invoice",
+        "state",
+        "fiscal_type_id",
+        "date_invoice",
+        "type",
+        "is_debit_note",
+    )
+    def _compute_fiscal_sequence(self):
+        """ Compute the sequence and fiscal position to be used depending on
+            the fiscal type that has been set on the invoice (or partner).
+        """
+        for inv in self.filtered(lambda i: i.state == "draft"):
+            if inv.is_debit_note:
+                debit_map = {"in_invoice": "in_debit", "out_invoice": "out_debit"}
+                fiscal_type = self.env["account.fiscal.type"].search(
+                    [("type", "=", debit_map[inv.type])], limit=1
+                )
+                inv.fiscal_type_id = fiscal_type.id
+            elif inv.type in ("out_refund", "in_refund"):
+                fiscal_type = self.env["account.fiscal.type"].search(
+                    [("type", "=", inv.type)], limit=1
+                )
+                inv.fiscal_type_id = fiscal_type.id
+            else:
+                fiscal_type = inv.fiscal_type_id
+
+            if (
+                inv.is_l10n_do_fiscal_invoice
+                and fiscal_type
+                and fiscal_type.assigned_sequence
+            ):
+
+                inv.assigned_sequence = fiscal_type.assigned_sequence
+                inv.fiscal_position_id = fiscal_type.fiscal_position_id
+
+                domain = [
+                    ("company_id", "=", inv.company_id.id),
+                    ("fiscal_type_id", "=", fiscal_type.id),
+                    ("state", "=", "active"),
+                ]
+                if inv.date_invoice:
+                    domain.append(("expiration_date", ">=", inv.date_invoice))
+                else:
+                    today = fields.Date.context_today(inv)
+                    domain.append(("expiration_date", ">=", today))
+
+                fiscal_sequence_id = inv.env["account.fiscal.sequence"].search(
+                    domain, order="expiration_date, id desc", limit=1,
+                )
+
+                if not fiscal_sequence_id:
+                    pass
+                elif fiscal_sequence_id.state == "active":
+                    inv.fiscal_sequence_id = fiscal_sequence_id
+                else:
+                    inv.fiscal_sequence_id = False
+            else:
+                inv.fiscal_sequence_id = False
+
+    @api.multi
+    @api.depends(
+        "fiscal_sequence_id",
+        "fiscal_sequence_id.sequence_remaining",
+        "fiscal_sequence_id.remaining_percentage",
+        "state",
+        "journal_id",
+    )
+    def _compute_fiscal_sequence_status(self):
+        """ Identify the percentage fiscal sequences that has been used so far.
+            With this result the user can be warned if it's above the threshold
+            or if there's no more sequences available.
+        """
+        for inv in self:
+
+            if not inv.is_l10n_do_fiscal_invoice or not inv.fiscal_sequence_id:
+                inv.fiscal_sequence_status = "no_fiscal"
+            else:
+                fs_id = inv.fiscal_sequence_id  # Fiscal Sequence
+                remaining = fs_id.sequence_remaining
+                remaining_percent = fs_id.remaining_percentage
+                seq_length = fs_id.sequence_end - fs_id.sequence_start + 1
+
+                consumed_percent = round(1 - (remaining / seq_length), 2) * 100
+
+                if consumed_percent < remaining_percent:
+                    inv.fiscal_sequence_status = "fiscal_ok"
+                elif remaining > 0 and consumed_percent >= remaining_percent:
+                    inv.fiscal_sequence_status = "almost_no_sequence"
+                else:
+                    inv.fiscal_sequence_status = "no_sequence"
+
+    @api.multi
+    @api.constrains("state", "tax_line_ids")
+    def validate_special_exempt(self):
+        """ Validates an invoice with Regímenes Especiales fiscal type
+            does not contain nor ITBIS or ISC.
+            See DGII Norma 05-19, Art 3 for further information.
+        """
+        for inv in self.filtered(lambda i: i.is_l10n_do_fiscal_invoice):
+            if (
+                inv.type == "out_invoice"
+                and inv.state in ("open", "cancel")
+                and ncf_dict.get(inv.fiscal_type_id.prefix) == "especial"
+            ):
+                # If any invoice tax in ITBIS or ISC
+                taxes = ("ITBIS", "ISC")
+                if any(
+                    [
+                        tax
+                        for tax in inv.tax_line_ids.mapped("tax_id").filtered(
+                            lambda tax: tax.tax_group_id.name in taxes
+                            and tax.amount != 0
+                        )
+                    ]
+                ):
+                    raise UserError(
+                        _(
+                            "You cannot validate and invoice of Fiscal Type "
+                            "Regímen Especial with ITBIS/ISC.\n\n"
+                            "See DGII General Norm 05-19, Art. 3 for further "
+                            "information"
+                        )
+                    )
+
+    @api.multi
+    @api.constrains("state", "invoice_line_ids", "partner_id")
+    def validate_products_export_ncf(self):
+        """ Validates that an invoices with a partner from country != DO
+            and products type != service must have Exportaciones NCF.
+            See DGII Norma 05-19, Art 10 for further information.
+        """
+        for inv in self:
+            if (
+                inv.type == "out_invoice"
+                and inv.state in ("open", "cancel")
+                and inv.partner_id.country_id
+                and inv.partner_id.country_id.code != "DO"
+                and inv.is_l10n_do_fiscal_invoice
+            ):
+                if any(
+                    [
+                        p
+                        for p in inv.invoice_line_ids.mapped("product_id")
+                        if p.type != "service"
+                    ]
+                ):
+                    if ncf_dict.get(inv.fiscal_type_id.prefix) == "exterior":
+                        raise UserError(
+                            _(
+                                "Goods sales to overseas customers must have "
+                                "Exportaciones Fiscal Type"
+                            )
+                        )
+                elif ncf_dict.get(inv.fiscal_type_id.prefix) == "consumo":
+                    raise UserError(
+                        _(
+                            "Service sales to oversas customer must have "
+                            "Consumo Fiscal Type"
+                        )
+                    )
+
+    @api.multi
+    @api.constrains("state", "tax_line_ids")
+    def validate_informal_withholding(self):
+        """ Validates an invoice with Comprobante de Compras has 100% ITBIS
+            withholding.
+            See DGII Norma 05-19, Art 7 for further information.
+        """
+        for inv in self.filtered(
+            lambda i: i.type == "in_invoice" and i.state == "open"
+        ):
+            if (
+                ncf_dict.get(inv.fiscal_type_id.prefix) == "informal"
+                and inv.is_l10n_do_fiscal_invoice
+            ):
+
+                # If the sum of all taxes of category ITBIS is not 0
+                if sum(
+                    [
+                        tax.amount
+                        for tax in inv.tax_line_ids.mapped("tax_id").filtered(
+                            lambda t: t.tax_group_id.name == "ITBIS"
+                        )
+                    ]
+                ):
+                    raise UserError(_("You must withhold 100% of ITBIS"))
+
+    @api.onchange("journal_id", "partner_id")
+    def _onchange_journal_id(self):
+        """ Set the Fiscal Type and the Fiscal Sequence to False, if the
+            invoice is not a fiscal invoice for l10n_do.
+        """
+        if not self.is_l10n_do_fiscal_invoice:
+            self.fiscal_type_id = False
+            self.fiscal_sequence_id = False
+
+        return super(AccountInvoice, self)._onchange_journal_id()
+
+    @api.onchange("fiscal_type_id")
+    def _onchange_fiscal_type(self):
+        """ Set the Journal to a fiscal journal if a Fiscal Type is set to the
+            invoice, making it a a fiscal invoice for l10n_do.
+        """
+        if self.is_l10n_do_fiscal_invoice and self.fiscal_type_id:
+            if ncf_dict.get(self.fiscal_type_id.prefix) == "minor":
+                self.partner_id = self.company_id.partner_id
+
+            fiscal_type = self.fiscal_type_id
+            fiscal_type_journal = fiscal_type.journal_id
+            if fiscal_type_journal and fiscal_type_journal != self.journal_id:
+                self.journal_id = fiscal_type_journal
+
+    @api.onchange("partner_id")
+    def _onchange_partner_id(self):
+        """ Set the Journal to a fiscal journal if a Fiscal Type is set to the
+            invoice, making it a a fiscal invoice for l10n_do.
+        """
+        if self.is_l10n_do_fiscal_invoice:
+            if self.partner_id and self.type == "out_invoice":
+                if not self.fiscal_type_id:
+                    self.fiscal_type_id = self.partner_id.sale_fiscal_type_id
+                if not self.partner_id.customer:
+                    self.partner_id.customer = True
+            elif self.partner_id and self.type == "in_invoice":
+                self.expense_type = self.partner_id.expense_type
+                if not self.partner_id.supplier:
+                    self.partner_id.supplier = True
+                if self.partner_id.id == self.company_id.partner_id.id:
+                    fiscal_type = self.env["account.fiscal.type"].search(
+                        [("type", "=", self.type), ("prefix", "=", "B13")], limit=1
+                    )
+                    if not fiscal_type:
+                        raise ValidationError(
+                            _(
+                                "A fiscal type for Minor Expenses does not exist"
+                                " and you have to create one."
+                            )
+                        )
+                    self.fiscal_type_id = fiscal_type
+                    return super(AccountInvoice, self)._onchange_partner_id()
+                self.fiscal_type_id = self.partner_id.purchase_fiscal_type_id
+
+        return super(AccountInvoice, self)._onchange_partner_id()
+
+    @api.onchange("reference")
+    def _onchange_ncf(self):
+        if self.is_l10n_do_fiscal_invoice and self.type in ('in_invoice',) and \
+                self.reference:
+            if not self.fiscal_type_id.assigned_sequence:
+                if self.fiscal_type_id.prefix != self.reference[:3]:
+                    raise UserError(
+                        _("The prefix of the fiscal sequence %s must be %s")
+                        % (self.fiscal_type_id.name, self.fiscal_type_id.prefix,))
+
+                if self.fiscal_type_id.padding != len(self.reference[3:]):
+                    raise UserError(
+                        _("The length of the fiscal sequence %s must be %s")
+                        % (self.fiscal_type_id.name, str(self.fiscal_type_id.padding),))
+
+    @api.multi
+    def action_invoice_open(self):
+        """ Before an invoice is changed to the 'open' state, validate that all
+            informations are valid regarding Norma 05-19 and if there are
+            available sequences to be used just before validation
+        """
+        for inv in self:
+
+            if inv.amount_untaxed == 0:
+                raise UserError(
+                    _(
+                        u"You cannot validate an invoice whose "
+                        u"total amount is equal to 0"
+                    )
+                )
+
+            if inv.is_l10n_do_fiscal_invoice:
+
+                # Because a Fiscal Sequence can be depleted while an invoice
+                # is waiting to be validated, compute fiscal_sequence_id again
+                # on invoice validate.
+                inv._compute_fiscal_sequence()
+
+                if not inv.reference \
+                        and not inv.fiscal_sequence_id \
+                        and inv.fiscal_type_id.assigned_sequence:
+                    raise ValidationError(
+                        _(
+                            "There is not active Fiscal Sequence for this type"
+                            "of document."
+                        )
+                    )
+
+                if inv.type == "out_invoice":
+                    if not inv.partner_id.sale_fiscal_type_id:
+                        inv.partner_id.sale_fiscal_type_id = inv.fiscal_type_id
+
+                if inv.type == "in_invoice":
+
+                    if not inv.partner_id.purchase_fiscal_type_id:
+                        inv.partner_id.purchase_fiscal_type_id = inv.fiscal_type_id
+                    if not inv.partner_id.expense_type:
+                        inv.partner_id.expense_type = inv.expense_type
+
+                if inv.fiscal_type_id.requires_document and not inv.partner_id.vat:
+                    raise UserError(
+                        _(
+                            "Partner [{}] {} doesn't have RNC/Céd, "
+                            "is required for NCF type {}"
+                        ).format(
+                            inv.partner_id.id,
+                            inv.partner_id.name,
+                            inv.fiscal_type_id.name,
+                        )
+                    )
+
+                elif inv.type in ("out_invoice", "out_refund"):
+                    if (
+                        inv.amount_untaxed_signed >= 250000
+                        and inv.fiscal_type_id.prefix != "B12"
+                        and not inv.partner_id.vat
+                    ):
+                        raise UserError(
+                            _(
+                                u"if the invoice amount is greater than "
+                                u"RD$250,000.00 "
+                                u"the customer should have RNC or Céd"
+                                u"for make invoice"
+                            )
+                        )
+
+        return super(AccountInvoice, self).action_invoice_open()
+
+    @api.multi
+    def validate_fiscal_purchase(self):
+        for inv in self.filtered(
+            lambda i: i.type == "in_invoice" and i.state == "draft"
+        ):
+            ncf = inv.reference if inv.reference else None
+            if ncf and ncf_dict.get(inv.fiscal_type_id.prefix) == "fiscal":
+                if ncf[-10:-8] == "02" or ncf[1:3] == "32":
+                    raise ValidationError(
+                        _(
+                            "NCF *{}* does not correspond with the fiscal type\n\n"
+                            "You cannot register Consumo (02 or 32) for purchases"
+                        ).format(ncf)
+                    )
+
+                elif inv.fiscal_type_id.requires_document and not inv.partner_id.vat:
+                    raise ValidationError(
+                        _(
+                            "Partner [{}] {} doesn't have RNC/Céd, "
+                            "is required for NCF type {}"
+                        ).format(
+                            inv.partner_id.id,
+                            inv.partner_id.name,
+                            inv.fiscal_type_id.name,
+                        )
+                    )
+
+                elif not ncf_validation.is_valid(ncf):
+                    raise UserError(
+                        _(
+                            "NCF wrongly typed\n\n"
+                            "This NCF *{}* does not have the proper structure, "
+                            "please validate if you have typed it correctly."
+                        ).format(ncf)
+                    )
+
+                # TODO move this to l10n_do_external_validation_ncf
+                elif (
+                    len(ncf) == 11
+                    and self.journal_id.l10n_do_ncf_remote_validation
+                    and not ncf_validation.check_dgii(self.partner_id.vat, ncf)
+                ):
+                    raise ValidationError(
+                        _(
+                            "NCF rejected by DGII\n\n"
+                            "NCF *{}* of supplier *{}* was rejected by DGII's "
+                            "validation service. Please validate if the NCF and "
+                            "the supplier RNC are type correctly. Otherwhise "
+                            "your supplier might not have this sequence approved "
+                            "yet."
+                        ).format(ncf, self.partner_id.name)
+                    )
+
+                ncf_in_invoice = (
+                    inv.search_count(
+                        [
+                            ("id", "!=", inv.id),
+                            ("company_id", "=", inv.company_id.id),
+                            ("partner_id", "=", inv.partner_id.id),
+                            ("reference", "=", ncf),
+                            ("state", "in", ("draft", "open", "paid", "cancel")),
+                            ("type", "in", ("in_invoice", "in_refund")),
+                        ]
+                    )
+                    if inv.id
+                    else inv.search_count(
+                        [
+                            ("partner_id", "=", inv.partner_id.id),
+                            ("company_id", "=", inv.company_id.id),
+                            ("reference", "=", ncf),
+                            ("state", "in", ("draft", "open", "paid", "cancel")),
+                            ("type", "in", ("in_invoice", "in_refund")),
+                        ]
+                    )
+                )
+
+                if ncf_in_invoice:
+                    raise ValidationError(
+                        _(
+                            "NCF already used in another invoice\n\n"
+                            "The NCF *{}* has already been registered in another "
+                            "invoice with the same supplier. Look for it in "
+                            "invoices with canceled or draft states"
+                        ).format(ncf)
+                    )
+
+    @api.multi
+    def _get_computed_reference(self):
+        self.ensure_one()
+        if self.is_l10n_do_fiscal_invoice:
+            return False
+        else:
+            return super(AccountInvoice, self)._get_computed_reference()
+
+    @api.multi
+    def invoice_validate(self):
+        """ After all invoice validation routine, consume a NCF sequence and
+            write it into reference field.
+         """
+        res = super(AccountInvoice, self).invoice_validate()
+
+        for inv in self:
+            if inv.is_l10n_do_fiscal_invoice \
+                    and not inv.reference \
+                    and inv.fiscal_type_id.assigned_sequence\
+                    and res:
+                inv.state = 'draft'
+                inv.write({
+                    'state': 'open',
+                    'reference': inv.fiscal_sequence_id.get_fiscal_number(),
+                    'ncf_expiration_date': inv.fiscal_sequence_id.expiration_date
+                })
+                inv.move_id.write({
+                    'ref': inv.reference
+                })
+
+        return res
+
+    @api.multi
+    def invoice_print(self):
+        # Companies which has installed l10n_do localization use
+        # l10n_do fiscal invoice template
+        l10n_do_coa = self.env.ref("l10n_do.do_chart_template")
+        if self.journal_id.company_id.chart_template_id.id == l10n_do_coa.id:
+            report_id = self.env.ref("l10n_do_accounting.l10n_do_account_invoice")
+            return report_id.report_action(self)
+
+        return super(AccountInvoice, self).invoice_print()
+
+    @api.model
+    def _prepare_refund(
+        self, invoice, date_invoice=None, date=None, description=None, journal_id=None
+    ):
+        """ Inherit Odoo's _prepare_refund() method to allow the use of fiscal
+            types and other required fields for l10n_do.
+        """
+        context = dict(self._context or {})
+        refund_type = context.get("refund_type")
+        amount = context.get("amount")
+        account = context.get("account")
+        refund_reference = context.get("refund_reference")
+
+        res = super(AccountInvoice, self)._prepare_refund(
+            invoice,
+            date_invoice=date_invoice,
+            date=date,
+            description=description,
+            journal_id=journal_id,
+        )
+
+        if refund_type and refund_type != "full_refund":
+            res["tax_line_ids"] = False
+            res["invoice_line_ids"] = [
+                (
+                    0,
+                    0,
+                    {"name": description, "price_unit": amount, "account_id": account},
+                )
+            ]
+
+        if not self.is_l10n_do_fiscal_invoice:
+            return res
+
+        fiscal_type = {"out_invoice": "out_refund", "in_invoice": "in_refund"}
+
+        fiscal_type_id = self.env["account.fiscal.type"].search(
+            [("type", "=", fiscal_type[self.type])], limit=1
+        )
+
+        if not fiscal_type_id:
+            raise ValidationError(_("No Fiscal Type found for Credit Note"))
+
+        res.update(
+            {
+                "reference": refund_reference,
+                "origin_out": self.reference,
+                "income_type": self.income_type,
+                "expense_type": self.expense_type,
+                "fiscal_type_id": fiscal_type_id.id,
+            }
+        )
+
+        return res
+
+    @api.multi
+    @api.returns("self")
+    def refund(self, date_invoice=None, date=None, description=None, journal_id=None):
+
+        context = dict(self._context or {})
+        refund_type = context.get("refund_type")
+        amount = context.get("amount")
+        account = context.get("account")
+
+        if not refund_type:
+            return super(AccountInvoice, self).refund(
+                date_invoice=date_invoice,
+                date=date,
+                description=description,
+                journal_id=journal_id,
+            )
+
+        new_invoices = self.browse()
+        for invoice in self:
+            # create the new invoice
+            values = self.with_context(
+                refund_type=refund_type, amount=amount, account=account
+            )._prepare_refund(
+                invoice,
+                date_invoice=date_invoice,
+                date=date,
+                description=description,
+                journal_id=journal_id,
+            )
+            refund_invoice = self.create(values)
+            if invoice.type == "out_invoice":
+                message = _(
+                    "This customer invoice credit note has been created from: "
+                    "<a href=# data-oe-model=account.invoice data-oe-id=%d>%s"
+                    "</a><br>Reason: %s"
+                ) % (invoice.id, invoice.number, description)
+            else:
+                message = _(
+                    "This vendor bill credit note has been created from: <a "
+                    "href=# data-oe-model=account.invoice data-oe-id=%d>%s</a>"
+                    "<br>Reason: %s"
+                ) % (invoice.id, invoice.number, description)
+
+            refund_invoice.message_post(body=message)
+            refund_invoice._compute_fiscal_sequence()
+            new_invoices += refund_invoice
+        return new_invoices
