@@ -442,7 +442,7 @@ class DgiiReport(models.Model):
                              '%m%Y').strftime('%Y%m')
 
         header = "606|{}|{}|{}".format(
-            str(company_vat).ljust(11), period, qty) + '\n'
+            str(company_vat), period, qty) + '\n'
         data = header + records
 
         file_path = '/tmp/DGII_606_{}_{}.txt'.format(company_vat, period)
