@@ -427,13 +427,13 @@ class DgiiReport(models.Model):
         LEG_TIP = self._get_formated_amount(values['legal_tip'])
         PAY_FORM = str(
             values['payment_type'] if values['payment_type'] else "").ljust(2)
-
-        return "|".join([
+        datos =  "|".join([
             RNC, ID_TYPE, EXP_TYPE, NCF, NCM, INV_DATE, PAY_DATE, SERV_AMOUNT,
             GOOD_AMOUNT, INV_AMOUNT, INV_ITBIS, WH_ITBIS, PROP_ITBIS,
             COST_ITBIS, ADV_ITBIS, PP_ITBIS, WH_TYPE, INC_WH, PP_ISR, ISC,
             OTHR, LEG_TIP, PAY_FORM
         ])
+        return datos.replace(" ","")
 
     def _generate_606_txt(self, records, qty):
 
@@ -941,6 +941,8 @@ class DgiiReport(models.Model):
 
         header = "608|{}|{}|{}".format(
             str(company_vat).ljust(11), period, qty) + '\n'
+        records.replace(" ", "")
+        header.replace(" ", "")
         data = header + records
 
         file_path = '/tmp/DGII_608_{}_{}.txt'.format(company_vat, period)
